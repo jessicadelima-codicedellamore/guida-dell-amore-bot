@@ -1,7 +1,7 @@
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
 import { getOrCreateUser, incrementFreeUsed, setPremium } from '../lib/supabase.js';
-import { LIMIT_FREE, MSG_START, MSG_UPSELL, MSG_PREMIUM_ON, MSG_PREMIUM_OFF, MSG_STATUS } from '../lib/texts.js';
+import { LIMIT_FREE, MSG_START, MSG_UPSELL, MSG_PREMIUM_ON, MSG_PREMIUM_OFF, MSG_STATUS, MSG_ERROR } from '../lib/texts.js';
 
 async function sendMessage(chatId, text, extra = {}) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -14,12 +14,19 @@ async function sendMessage(chatId, text, extra = {}) {
 async function openAIReply(prompt) {
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+    },
     body: JSON.stringify({
       model: 'gpt-4o-mini',
       temperature: 0.5,
       messages: [
-        { role: 'system', content: 'Sei una guida spirituale e affettiva (Guida dell’Amore). Rispondi con calore, chiarezza e fermezza.' },
+        {
+          role: 'system',
+          content:
+            'Sei una guida amorosa spirituale (Guida dell’Amore). Rispondi con calore, chiarezza e fermezza.'
+        },
         { role: 'user', content: prompt }
       ]
     })
@@ -43,17 +50,20 @@ export default async (req, res) => {
   try {
     const isAdmin = process.env.ADMIN_TELEGRAM_ID && fromId === process.env.ADMIN_TELEGRAM_ID;
 
+    // /start
     if (text === '/start') {
       await sendMessage(chatId, MSG_START);
       return res.status(200).json({ ok: true });
     }
 
+    // /status
     if (text.startsWith('/status')) {
       const user = await getOrCreateUser(fromId);
       await sendMessage(chatId, MSG_STATUS(user.free_used, user.is_premium));
       return res.status(200).json({ ok: true });
     }
 
+    // /premium (admin)
     if (isAdmin && text.startsWith('/premium')) {
       const [, cmd, idRaw] = text.split(' ');
       const targetId = idRaw ? idRaw.trim() : fromId;
@@ -64,11 +74,16 @@ export default async (req, res) => {
         await setPremium(targetId, false);
         await sendMessage(chatId, MSG_PREMIUM_OFF(targetId));
       } else {
-        await sendMessage(chatId, 'Uso: `/premium on <telegram_id>` o `/premium off <telegram_id>`', { parse_mode: 'Markdown' });
+        await sendMessage(
+          chatId,
+          'Uso: `/premium on <telegram_id>` o `/premium off <telegram_id>`',
+          { parse_mode: 'Markdown' }
+        );
       }
       return res.status(200).json({ ok: true });
     }
 
+    // Fluxo padrão
     const user = await getOrCreateUser(fromId);
 
     if (!user.is_premium && user.free_used >= LIMIT_FREE) {
@@ -84,7 +99,8 @@ export default async (req, res) => {
     return res.status(200).json({ ok: true });
   } catch (e) {
     console.error(e);
-    await sendMessage(chatId, 'Ops, algo deu errado. Tenta novamente entre instanti. 💗');
+    // Mensagem de erro “Hadassa in preghiera”
+    await sendMessage(chatId, MSG_ERROR);
     return res.status(200).json({ ok: true });
   }
 };
