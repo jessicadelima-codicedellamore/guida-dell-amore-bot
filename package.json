@@ -1,13 +1,11 @@
 {
   "name": "guida-dell-amore-bot",
-  "version": "1.0.0",
-  "type": "module",
   "private": true,
-  "engines": {
-    "node": "18.x"
-  },
+  "type": "module",
+  "version": "1.0.0",
+  "engines": { "node": ">=20" },
   "scripts": {
-    "start": "node api/telegram.js"
+    "vercel-build": "echo skip"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4"
