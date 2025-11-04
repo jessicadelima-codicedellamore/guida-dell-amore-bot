@@ -1,7 +1,14 @@
 // api/telegram.js
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
-import { getOrCreateUser, incrementFreeUsed, setPremium } from '../lib/supabase.js';
+import {
+  getOrCreateUser,
+  incrementFreeUsed,
+  setPremium,
+  upsertUserEmail,
+  hasApprovedPurchase
+} from '../lib/supabase.js';
+
 import {
   LIMIT_FREE,
   MSG_START,
@@ -11,7 +18,11 @@ import {
   MSG_STATUS,
   MSG_ERROR,
   WELCOME_IMAGE_URL,
-  HOTMART_URL
+  HOTMART_URL,
+  UPSELL_IMAGE_URL,
+  MSG_ASK_EMAIL,
+  MSG_EMAIL_SAVED,
+  MSG_EMAIL_NOT_FOUND
 } from '../lib/texts.js';
 
 // ===== Helpers =====
@@ -35,6 +46,10 @@ async function sendPhoto(chatId, photoUrl, caption, extra = {}) {
       ...extra
     })
   });
+}
+
+function looksLikeEmail(s) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
 async function openAIReply(prompt) {
@@ -69,13 +84,13 @@ async function getTelegramFileUrl(fileId) {
   return `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${j.result.file_path}`;
 }
 
-// OpenAI Whisper: transcrever áudio a partir de URL
+// OpenAI Whisper: transcrever áudio (voz Telegram)
 async function transcribeFromUrl(fileUrl) {
   const audioResp = await fetch(fileUrl);
   const audioBuf = await audioResp.arrayBuffer();
 
   const fd = new FormData();
-  fd.append('model', 'whisper-1'); // bom para OGG (voz Telegram)
+  fd.append('model', 'whisper-1');
   fd.append('file', new Blob([audioBuf]), 'voice.ogg');
 
   const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
@@ -100,22 +115,21 @@ export default async (req, res) => {
   const chatId = msg.chat.id;
   const fromId = String(msg.from.id);
 
-  // Entrada pode ser texto ou áudio
+  // Entrada: texto ou áudio
   let text = (msg.text || '').trim();
 
-  // Limite de voz (padrão 120s = 2 min). Pode alterar via env VOICE_MAX_SECONDS.
+  // Limite de voz (padrão 120s = 2 min)
   const VOICE_MAX_SECONDS = Number(process.env.VOICE_MAX_SECONDS || 120);
 
   try {
     const isAdmin = process.env.ADMIN_TELEGRAM_ID && fromId === process.env.ADMIN_TELEGRAM_ID;
 
-    // Se veio voice/audio, checa duração
+    // Áudio/voice
     let durationSec = 0;
     if (msg.voice?.duration) durationSec = Number(msg.voice.duration);
     if (msg.audio?.duration) durationSec = Number(msg.audio.duration);
 
     if (!text && (msg.voice || msg.audio)) {
-      // recusa se acima do limite
       if (durationSec > VOICE_MAX_SECONDS) {
         await sendMessage(
           chatId,
@@ -125,29 +139,23 @@ export default async (req, res) => {
         );
         return res.status(200).json({ ok: true });
       }
-
-      // dentro do limite → transcreve
       const fileId = (msg.voice?.file_id || msg.audio?.file_id);
       const url = await getTelegramFileUrl(fileId);
       text = await transcribeFromUrl(url);
-
-      // opcional: mostrar a transcrição
       await sendMessage(chatId, `🗣️ *Trascrizione:* _${text}_`, { disable_web_page_preview: true });
     }
 
-    // /start → imagem + legenda + botão de checkout
+    // /start → imagem + legenda + botão
     if (text === '/start') {
       await sendPhoto(chatId, WELCOME_IMAGE_URL, MSG_START, {
         reply_markup: {
-          inline_keyboard: [
-            [{ text: '💖 Attiva il Premium (–57%)', url: HOTMART_URL }]
-          ]
+          inline_keyboard: [[{ text: '💖 Attiva il Premium (–57%)', url: HOTMART_URL }]]
         }
       });
       return res.status(200).json({ ok: true });
     }
 
-    // /status → mostra status
+    // /status
     if (text.startsWith('/status')) {
       const user = await getOrCreateUser(fromId);
       await sendMessage(chatId, MSG_STATUS(user.free_used, user.is_premium));
@@ -165,11 +173,9 @@ export default async (req, res) => {
         await setPremium(targetId, false);
         await sendMessage(chatId, MSG_PREMIUM_OFF(targetId));
       } else {
-        await sendMessage(
-          chatId,
-          'Uso: `/premium on <telegram_id>` o `/premium off <telegram_id>`',
-          { parse_mode: 'Markdown' }
-        );
+        await sendMessage(chatId, 'Uso: `/premium on <telegram_id>` o `/premium off <telegram_id>`', {
+          parse_mode: 'Markdown'
+        });
       }
       return res.status(200).json({ ok: true });
     }
@@ -177,20 +183,35 @@ export default async (req, res) => {
     // Fluxo padrão
     const user = await getOrCreateUser(fromId);
 
-    // atingiu limite gratuito e não é premium → upsell com botão
-    if (!user.is_premium && user.free_used >= LIMIT_FREE) {
-      await sendMessage(chatId, MSG_UPSELL, {
-        disable_web_page_preview: true,
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '💖 Attiva il Premium (–57%)', url: HOTMART_URL }]
-          ]
-        }
-      });
+    // Se a usuária enviar um e-mail, tentamos ativar
+    if (looksLikeEmail(text)) {
+      const email = text.toLowerCase();
+      await sendMessage(chatId, MSG_EMAIL_SAVED(email));
+      await upsertUserEmail(fromId, email);
+
+      const ok = await hasApprovedPurchase(email);
+      if (ok) {
+        await setPremium(fromId, true);
+        await sendMessage(chatId, '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!');
+      } else {
+        await sendMessage(chatId, MSG_EMAIL_NOT_FOUND);
+      }
       return res.status(200).json({ ok: true });
     }
 
-    // Se ainda não houver texto (ex.: áudio vazio), instrui a usuária
+    // Atingiu limite grátis → upsell (imagem + botão) + pedir e-mail
+    if (!user.is_premium && user.free_used >= LIMIT_FREE) {
+      await sendPhoto(chatId, UPSELL_IMAGE_URL, MSG_UPSELL, {
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [[{ text: '💖 Attiva il Premium (–57%)', url: HOTMART_URL }]]
+        }
+      });
+      await sendMessage(chatId, MSG_ASK_EMAIL);
+      return res.status(200).json({ ok: true });
+    }
+
+    // Se não mandou texto (ex.: áudio vazio), instruir
     if (!text) {
       await sendMessage(
         chatId,
