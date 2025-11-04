@@ -1,13 +1,54 @@
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
-import { getOrCreateUser, incrementFreeUsed, setPremium } from '../lib/supabase.js';
-import { LIMIT_FREE, MSG_START, MSG_UPSELL, MSG_PREMIUM_ON, MSG_PREMIUM_OFF, MSG_STATUS, MSG_ERROR } from '../lib/texts.js';
+import {
+  getOrCreateUser,
+  incrementFreeUsed,
+  setPremium
+} from '../lib/supabase.js';
 
+import {
+  LIMIT_FREE,
+  // (mantidas para compatibilidade)
+  MSG_START,
+  MSG_UPSELL,
+  MSG_PREMIUM_ON,
+  MSG_PREMIUM_OFF,
+  MSG_STATUS,
+  MSG_ERROR,
+  // Novos (para foto com botão)
+  WELCOME_PHOTO,
+  PREMIUM_PHOTO,
+  CAPTION_START_HTML,
+  CAPTION_UPSELL_HTML,
+  KB_PREMIUM
+} from '../lib/texts.js';
+
+// Envia texto (Markdown)
 async function sendMessage(chatId, text, extra = {}) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown', ...extra })
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: 'Markdown',
+      ...extra
+    })
+  });
+}
+
+// Envia foto com legenda HTML (para suportar <b>…</b>)
+async function sendPhoto(chatId, photo, caption, extra = {}) {
+  await fetch(`${TELEGRAM_API}/sendPhoto`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      photo,
+      caption,
+      parse_mode: 'HTML',
+      ...extra
+    })
   });
 }
 
@@ -24,8 +65,7 @@ async function openAIReply(prompt) {
       messages: [
         {
           role: 'system',
-          content:
-            'Sei una guida amorosa spirituale (Guida dell’Amore). Rispondi con calore, chiarezza e fermezza.'
+          content: 'Sei una guida amorosa spirituale (Guida dell’Amore). Rispondi con calore, chiarezza e fermezza.'
         },
         { role: 'user', content: prompt }
       ]
@@ -50,9 +90,11 @@ export default async (req, res) => {
   try {
     const isAdmin = process.env.ADMIN_TELEGRAM_ID && fromId === process.env.ADMIN_TELEGRAM_ID;
 
-    // /start
+    // /start — agora com FOTO + botão de checkout
     if (text === '/start') {
-      await sendMessage(chatId, MSG_START);
+      await sendPhoto(chatId, WELCOME_PHOTO, CAPTION_START_HTML, {
+        reply_markup: KB_PREMIUM
+      });
       return res.status(200).json({ ok: true });
     }
 
@@ -86,11 +128,15 @@ export default async (req, res) => {
     // Fluxo padrão
     const user = await getOrCreateUser(fromId);
 
+    // Se acabou o grátis → FOTO de upsell com botão
     if (!user.is_premium && user.free_used >= LIMIT_FREE) {
-      await sendMessage(chatId, MSG_UPSELL, { disable_web_page_preview: true });
+      await sendPhoto(chatId, PREMIUM_PHOTO, CAPTION_UPSELL_HTML, {
+        reply_markup: KB_PREMIUM
+      });
       return res.status(200).json({ ok: true });
     }
 
+    // Resposta normal
     const reply = await openAIReply(text || 'Guidami.');
     await sendMessage(chatId, reply);
 
