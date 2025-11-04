@@ -3,6 +3,12 @@
   "version": "1.0.0",
   "type": "module",
   "private": true,
+  "engines": {
+    "node": "18.x"
+  },
+  "scripts": {
+    "start": "node api/telegram.js"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4"
   }
