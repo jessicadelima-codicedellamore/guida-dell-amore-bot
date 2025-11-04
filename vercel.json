@@ -2,7 +2,7 @@
   "version": 2,
   "functions": {
     "api/**/*.js": {
-      "runtime": "node@22.0.0",
+      "runtime": "node.js@22.0.0",
       "maxDuration": 10
     }
   },
