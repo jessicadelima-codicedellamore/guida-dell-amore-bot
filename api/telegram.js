@@ -162,7 +162,31 @@ export default async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    // /premium (admin)
+    // /email nome@dominio.com → salva email da compradora e tenta ativar Premium
+if (text.startsWith('/email')) {
+  const e = text.replace('/email', '').trim();
+  const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+
+  if (!e || !ok) {
+    await sendMessage(chatId, MSG_EMAIL_BAD, { parse_mode: 'Markdown' });
+    return res.status(200).json({ ok: true });
+  }
+
+  await upsertUserEmail(fromId, e);
+  await sendMessage(chatId, MSG_EMAIL_OK(e), { parse_mode: 'Markdown' });
+
+  const hasPurchase = await hasApprovedPurchase(e);
+  if (hasPurchase) {
+    await setPremium(fromId, true);
+    await sendMessage(chatId, '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!');
+  } else {
+    await sendMessage(chatId, MSG_EMAIL_NOT_FOUND);
+  }
+
+  return res.status(200).json({ ok: true });
+}
+
+// /premium (admin)
     if (isAdmin && text.startsWith('/premium')) {
       const [, cmd, idRaw] = text.split(' ');
       const targetId = idRaw ? idRaw.trim() : fromId;
