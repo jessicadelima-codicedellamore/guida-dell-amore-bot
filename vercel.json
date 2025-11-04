@@ -1,15 +1,7 @@
 {
   "version": 2,
-  "functions": {
-    "api/**/*.js": {
-      "runtime": ""nodejs22.x",
-      "maxDuration": 10
-    }
-  },
   "routes": [
     { "src": "/api/telegram", "dest": "/api/telegram.js" },
-    { "src": "/api/hotmart",  "dest": "/api/hotmart.js" }
+    { "src": "/api/hotmart", "dest": "/api/hotmart.js" }
   ]
 }
-
-
