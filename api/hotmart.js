@@ -1,55 +1,61 @@
 // api/hotmart.js
 import { logPurchase, setPremiumByEmail } from '../lib/supabase.js';
 
+// Mapeia vários formatos que a Hotmart pode enviar (v2.0 + variações)
+function parseHotmart(body) {
+  const b = body || {};
+  const d = b.data || {};
+
+  const buyer   = b.buyer   || d.buyer   || {};
+  const purch   = b.purchase|| d.purchase|| {};
+  const prod    = b.product || d.product || {};
+
+  const email =
+    (buyer.email || buyer.checkout_email || b.buyer_email || b.email || '').toLowerCase().trim();
+
+  // normaliza status sempre em UPPER
+  const statusRaw =
+    purch.status || b.status || d.status || '';
+  const status = String(statusRaw || '').toUpperCase().trim();
+
+  // tenta nome/id do produto/oferta
+  const product =
+    prod.name || prod.id || b.product_name || b.offer || null;
+
+  return { email, status, product };
+}
+
 export default async (req, res) => {
   if (req.method !== 'POST') return res.status(405).end();
 
-  // Validação simples via query ?secret=...
-  const qsSecret = req.query?.secret;
-  if (
-    process.env.HOTMART_WEBHOOK_SECRET &&
-    qsSecret !== process.env.HOTMART_WEBHOOK_SECRET
-  ) {
-    return res.status(401).json({ ok: false, error: 'invalid secret' });
-  }
-
   try {
-    const body = req.body || {};
+    // Loga o payload bruto pra debug (aparece nos Logs da Vercel)
+    console.log('Hotmart RAW:', JSON.stringify(req.body));
 
-    const email =
-      (body.buyer && (body.buyer.email || body.buyer.checkout_email)) ||
-      body.buyer_email ||
-      body.email ||
-      '';
+    const { email, status, product } = parseHotmart(req.body || {});
+    console.log('Hotmart parsed:', { email, status, product });
 
-    const status =
-      (body.purchase && body.purchase.status) ||
-      body.status ||
-      (body.data && body.data.status) ||
-      '';
-
-    const product =
-      (body.product && (body.product.name || body.product.id)) ||
-      body.product_name ||
-      body.offer ||
-      '';
-
+    // Sempre registra em purchases (quando houver dados mínimos)
     if (email && status) {
       await logPurchase(email, status, product);
 
-      // Liga/desliga premium automaticamente por email:
-      const s = String(status).toUpperCase();
-      if (['APPROVED', 'ACTIVE', 'CANCELED_REVERSAL'].includes(s)) {
+      // Status que CONCEDEM premium
+      const GRANT = new Set(['APPROVED', 'COMPLETE', 'ACTIVE', 'CANCELED_REVERSAL']);
+      // Status que REVOGAM premium
+      const REVOKE = new Set(['REFUNDED', 'CHARGEBACK', 'CANCELED', 'CANCELLED', 'EXPIRED']);
+
+      if (GRANT.has(status)) {
         await setPremiumByEmail(email, true);
-      }
-      if (['REFUNDED', 'CANCELED', 'CHARGEBACK'].includes(s)) {
+      } else if (REVOKE.has(status)) {
         await setPremiumByEmail(email, false);
       }
     }
 
+    // Sempre responde 200 pra Hotmart não ficar em “retenção”
     return res.status(200).json({ ok: true });
   } catch (e) {
     console.error('Hotmart webhook error:', e);
+    // Mesmo em erro, devolve 200 pra não travar a fila de webhooks
     return res.status(200).json({ ok: true });
   }
 };
