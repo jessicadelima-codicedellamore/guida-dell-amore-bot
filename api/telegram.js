@@ -95,7 +95,7 @@ async function getTelegramFileUrl(fileId) {
   return `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${j.result.file_path}`;
 }
 
-// ===== ALTERAÇÃO #1: Transcrever áudio forçando ITALIANO e sem mostrar por padrão =====
+// ===== Transcrever áudio em ITALIANO e não mostrar por padrão =====
 async function transcribeFromUrl(fileUrl, language = 'it') {
   const audioResp = await fetch(fileUrl);
   const audioBuf = await audioResp.arrayBuffer();
@@ -103,9 +103,8 @@ async function transcribeFromUrl(fileUrl, language = 'it') {
   const fd = new FormData();
   fd.append('model', 'whisper-1');
   fd.append('file', new Blob([audioBuf]), 'voice.ogg');
-  // força a transcrição em italiano
   fd.append('language', language);
-  // (opcional) garantir que não traduza: fd.append('translate', 'false');
+  fd.append('translate', 'false');
 
   const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
@@ -115,6 +114,35 @@ async function transcribeFromUrl(fileUrl, language = 'it') {
   const j = await r.json();
   if (!j.text) throw new Error('no transcript');
   return j.text.trim();
+}
+
+// ===== Helpers de FAQ Preço/Pagamento =====
+function isPricingQuestion(t) {
+  return /\b(prezzo|costo|quanto costa|quanto è|preço|valor)\b/i.test(t);
+}
+function isPaymentQuestion(t) {
+  return /\b(pagamento|pagare|paghi|pagar|formas? de pagamento|metodi di pagamento|paypal|carta|boleto|pix)\b/i.test(t);
+}
+function faqPricingMessage() {
+  return (
+`💖 *Piano Premium — Guida dell’Amore*
+• *Mensile*: circa *€ 5,75 a settimana* (–57%)
+• Accesso immediato dopo l’acquisto
+• Fino a *8.000 parole/giorno* (~*70 pagine* di dialogo)
+• Risposte profonde, personalizzate, ogni giorno
+
+Attiva qui: ${HOTMART_URL}`
+  );
+}
+function faqPaymentMessage() {
+  return (
+`💳 *Metodi di pagamento*
+• Carte di credito/debito
+• (Se disponibile su Hotmart nel tuo Paese) *PayPal*
+
+Dopo il pagamento *l’accesso è immediato*.
+Attiva qui: ${HOTMART_URL}`
+  );
 }
 
 // ===== Handler =====
@@ -159,16 +187,13 @@ export default async (req, res) => {
       }
       const fileId = (msg.voice?.file_id || msg.audio?.file_id);
       const url = await getTelegramFileUrl(fileId);
-
-      // ===== ALTERAÇÃO #2: usar 'it' e não exibir transcrição por padrão =====
       text = await transcribeFromUrl(url, 'it');
       if (process.env.SHOW_TRANSCRIPT === '1') {
         await sendMessage(chatId, `🗣️ *Trascrizione:* _${text}_`, { disable_web_page_preview: true });
       }
-      // (sem marcar responded aqui; ainda vamos mandar a resposta principal)
     }
 
-    // /start → imagem + legenda + botão
+    // /start
     if (text === '/start') {
       await sendPhoto(chatId, WELCOME_IMAGE_URL, MSG_START, {
         reply_markup: {
@@ -187,27 +212,21 @@ export default async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    // /email nome@dominio.com → salva email e tenta ativar Premium
+    // /email
     if (text.startsWith('/email')) {
       const e = text.replace('/email', '').trim();
       const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
-
       if (!e || !ok) {
-        await sendMessage(chatId, MSG_EMAIL_BAD, { parse_mode: 'Markdown' });
+        await sendMessage(chatId, MSG_EMAIL_BAD);
         responded = true;
         return res.status(200).json({ ok: true });
       }
-
       await upsertUserEmail(fromId, e);
-      await sendMessage(chatId, MSG_EMAIL_OK(e), { parse_mode: 'Markdown' });
-
+      await sendMessage(chatId, MSG_EMAIL_OK(e));
       const hasPurchase = await hasApprovedPurchase(e);
       if (hasPurchase) {
         await setPremium(fromId, true);
-        await sendMessage(
-          chatId,
-          '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!'
-        );
+        await sendMessage(chatId, '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!');
       } else {
         await sendMessage(chatId, MSG_EMAIL_NOT_FOUND);
       }
@@ -226,30 +245,53 @@ export default async (req, res) => {
         await setPremium(targetId, false);
         await sendMessage(chatId, MSG_PREMIUM_OFF(targetId));
       } else {
-        await sendMessage(chatId, 'Uso: `/premium on <telegram_id>` o `/premium off <telegram_id>`', {
-          parse_mode: 'Markdown'
-        });
+        await sendMessage(chatId, 'Uso: `/premium on <telegram_id>` o `/premium off <telegram_id>`');
       }
       responded = true;
       return res.status(200).json({ ok: true });
     }
 
-    // Fluxo padrão
+    // ===== FAQ — ativo para TODAS, mas conta limite só se NÃO-PREMIUM =====
     const user = await getOrCreateUser(fromId);
+    if (text) {
+      const t = text.toLowerCase();
+      if (isPricingQuestion(t)) {
+        await sendMessage(chatId, faqPricingMessage(), {
+          disable_web_page_preview: true,
+          reply_markup: {
+            inline_keyboard: [[{ text: '💖 Attiva il Premium', url: HOTMART_URL }]]
+          }
+        });
+        if (!user.is_premium) {
+          try { await incrementFreeUsed(fromId); } catch (err) { console.error(err); }
+        }
+        responded = true;
+        return res.status(200).json({ ok: true });
+      }
+      if (isPaymentQuestion(t)) {
+        await sendMessage(chatId, faqPaymentMessage(), {
+          disable_web_page_preview: true,
+          reply_markup: {
+            inline_keyboard: [[{ text: '💖 Procedi al pagamento', url: HOTMART_URL }]]
+          }
+        });
+        if (!user.is_premium) {
+          try { await incrementFreeUsed(fromId); } catch (err) { console.error(err); }
+        }
+        responded = true;
+        return res.status(200).json({ ok: true });
+      }
+    }
 
-    // Se a usuária enviar um e-mail no texto, tentamos ativar
+    // E-mail no texto
     if (looksLikeEmail(text)) {
       const email = text.toLowerCase();
       await sendMessage(chatId, MSG_EMAIL_SAVED(email));
       await upsertUserEmail(fromId, email);
-
       const ok = await hasApprovedPurchase(email);
       if (ok) {
         await setPremium(fromId, true);
-        await sendMessage(
-          chatId,
-          '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!'
-        );
+        await sendMessage(chatId, '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!');
       } else {
         await sendMessage(chatId, MSG_EMAIL_NOT_FOUND);
       }
@@ -257,48 +299,37 @@ export default async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    // Atingiu limite grátis → upsell (imagem + botão) + pedir e-mail
+    // Limite grátis
     if (!user.is_premium && user.free_used >= LIMIT_FREE) {
       await sendPhoto(chatId, UPSELL_IMAGE_URL, MSG_UPSELL, {
-        disable_web_page_preview: true,
-        reply_markup: {
-          inline_keyboard: [[{ text: '💖 Attiva il Premium (–57%)', url: HOTMART_URL }]]
-        }
+        reply_markup: { inline_keyboard: [[{ text: '💖 Attiva il Premium (–57%)', url: HOTMART_URL }]] }
       });
       await sendMessage(chatId, MSG_ASK_EMAIL);
       responded = true;
       return res.status(200).json({ ok: true });
     }
 
-    // Se não mandou texto (ex.: áudio vazio), instruir
+    // Mensagem vazia
     if (!text) {
-      await sendMessage(
-        chatId,
-        '📝 Inviami un *messaggio di testo* o un *messaggio vocale* chiaro (max 2 minuti).'
-      );
+      await sendMessage(chatId, '📝 Inviami un *messaggio di testo* o un *messaggio vocale* chiaro (max 2 minuti).');
       responded = true;
       return res.status(200).json({ ok: true });
     }
 
-    // Resposta da IA — com o nome da usuária
+    // Resposta IA
     const userName = msg.from?.first_name || '';
     const reply = await openAIReply(text || 'Guidami.', userName);
     await sendMessage(chatId, reply);
     responded = true;
 
-    // Contabiliza grátis (sem derrubar a conversa se falhar)
     try {
       if (!user.is_premium) await incrementFreeUsed(fromId);
-    } catch (err) {
-      console.error('increment_free_used failed:', err);
-    }
+    } catch (err) { console.error(err); }
 
     return res.status(200).json({ ok: true });
   } catch (e) {
     console.error(e);
-    if (!responded) {
-      await sendMessage(chatId, MSG_ERROR);
-    }
+    if (!responded) await sendMessage(chatId, MSG_ERROR);
     return res.status(200).json({ ok: true });
   }
 };
