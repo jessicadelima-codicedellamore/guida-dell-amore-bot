@@ -68,7 +68,7 @@ OBIETTIVO
 - Evita ripetizioni, termini tecnici inutili e frasi generiche.
 
 REGOLE DI STILE (psico-spirituale, didattico ed empatico)
-- Inizia SEMPRE chiamando l’utente per nome: "${name}".
+- Inizia chiamando l’utente per nome (se fornito).
 - Tono empatico e compassionevole, autorevolezza gentile (verità + direzione + speranza).
 - Spiega su tre livelli quando utile: psicologico (dopamina/ossitocina/attaccamento),
   mentale (schemi, “codice interiore”), spirituale (legami d’anima, preghiera).
@@ -107,22 +107,27 @@ async function getTelegramFileUrl(fileId) {
   return `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${j.result.file_path}`;
 }
 
-// ===== Transcrever áudio em ITALIANO e não mostrar por padrão =====
+// ===== Transcrever áudio em ITALIANO (estável) =====
 async function transcribeFromUrl(fileUrl, language = 'it') {
   const audioResp = await fetch(fileUrl);
   const audioBuf = await audioResp.arrayBuffer();
 
   const fd = new FormData();
   fd.append('model', 'whisper-1');
-  fd.append('file', new Blob([audioBuf]), 'voice.ogg');
+  fd.append('file', new Blob([audioBuf], { type: 'audio/ogg' }), 'voice.ogg');
   fd.append('language', language);
-  fd.append('translate', 'false');
 
   const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: fd
   });
+
+  if (!r.ok) {
+    const txt = await r.text();
+    throw new Error(`whisper_failed: ${r.status} ${txt}`);
+  }
+
   const j = await r.json();
   if (!j.text) throw new Error('no transcript');
   return j.text.trim();
@@ -197,11 +202,26 @@ export default async (req, res) => {
         responded = true;
         return res.status(200).json({ ok: true });
       }
+
       const fileId = (msg.voice?.file_id || msg.audio?.file_id);
       const url = await getTelegramFileUrl(fileId);
-      text = await transcribeFromUrl(url, 'it');
-      if (process.env.SHOW_TRANSCRIPT === '1') {
-        await sendMessage(chatId, `🗣️ *Trascrizione:* _${text}_`, { disable_web_page_preview: true });
+
+      // Transcrição com try/catch local (não derruba o fluxo)
+      try {
+        text = await transcribeFromUrl(url, 'it');
+        if (process.env.SHOW_TRANSCRIPT === '1') {
+          await sendMessage(chatId, `🗣️ *Trascrizione:* _${text}_`, { disable_web_page_preview: true });
+        }
+      } catch (err) {
+        console.error('transcription failed:', err);
+        await sendMessage(
+          chatId,
+          `🗣️ Non sono riuscita a capire bene l’audio.\n` +
+          `Puoi *inviarmi di nuovo un vocale più breve* (max ${VOICE_MAX_SECONDS}s) ` +
+          `oppure *scrivere in testo* quello che vuoi dirmi? Ti rispondo subito. 🌹`
+        );
+        responded = true;
+        return res.status(200).json({ ok: true });
       }
     }
 
