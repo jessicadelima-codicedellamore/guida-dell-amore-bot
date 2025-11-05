@@ -22,7 +22,9 @@ import {
   UPSELL_IMAGE_URL,
   MSG_ASK_EMAIL,
   MSG_EMAIL_SAVED,
-  MSG_EMAIL_NOT_FOUND
+  MSG_EMAIL_NOT_FOUND,
+  MSG_EMAIL_BAD,
+  MSG_EMAIL_OK
 } from '../lib/texts.js';
 
 // ===== Helpers =====
@@ -121,6 +123,9 @@ export default async (req, res) => {
   // Limite de voz (padrão 120s = 2 min)
   const VOICE_MAX_SECONDS = Number(process.env.VOICE_MAX_SECONDS || 120);
 
+  // Flag para não enviar MSG_ERROR depois de já ter respondido algo
+  let responded = false;
+
   try {
     const isAdmin = process.env.ADMIN_TELEGRAM_ID && fromId === process.env.ADMIN_TELEGRAM_ID;
 
@@ -134,15 +139,17 @@ export default async (req, res) => {
         await sendMessage(
           chatId,
           `🎧 Il messaggio vocale è lungo *${Math.round(durationSec)}s*.\n` +
-          `Per favore invia audio fino a *${VOICE_MAX_SECONDS}s* oppure spezzalo in parti più brevi.\n` +
-          `Se vuoi, puoi anche scrivere in testo — ti risponderò con la stessa cura. 🌹`
+            `Per favore invia audio fino a *${VOICE_MAX_SECONDS}s* oppure spezzalo in parti più brevi.\n` +
+            `Se vuoi, puoi anche scrivere in testo — ti risponderò con la stessa cura. 🌹`
         );
+        responded = true;
         return res.status(200).json({ ok: true });
       }
       const fileId = (msg.voice?.file_id || msg.audio?.file_id);
       const url = await getTelegramFileUrl(fileId);
       text = await transcribeFromUrl(url);
       await sendMessage(chatId, `🗣️ *Trascrizione:* _${text}_`, { disable_web_page_preview: true });
+      // (sem marcar responded aqui; ainda vamos mandar a resposta principal)
     }
 
     // /start → imagem + legenda + botão
@@ -152,6 +159,7 @@ export default async (req, res) => {
           inline_keyboard: [[{ text: '💖 Attiva il Premium (–57%)', url: HOTMART_URL }]]
         }
       });
+      responded = true;
       return res.status(200).json({ ok: true });
     }
 
@@ -159,34 +167,39 @@ export default async (req, res) => {
     if (text.startsWith('/status')) {
       const user = await getOrCreateUser(fromId);
       await sendMessage(chatId, MSG_STATUS(user.free_used, user.is_premium));
+      responded = true;
       return res.status(200).json({ ok: true });
     }
 
-    // /email nome@dominio.com → salva email da compradora e tenta ativar Premium
-if (text.startsWith('/email')) {
-  const e = text.replace('/email', '').trim();
-  const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+    // /email nome@dominio.com → salva email e tenta ativar Premium
+    if (text.startsWith('/email')) {
+      const e = text.replace('/email', '').trim();
+      const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
-  if (!e || !ok) {
-    await sendMessage(chatId, MSG_EMAIL_BAD, { parse_mode: 'Markdown' });
-    return res.status(200).json({ ok: true });
-  }
+      if (!e || !ok) {
+        await sendMessage(chatId, MSG_EMAIL_BAD, { parse_mode: 'Markdown' });
+        responded = true;
+        return res.status(200).json({ ok: true });
+      }
 
-  await upsertUserEmail(fromId, e);
-  await sendMessage(chatId, MSG_EMAIL_OK(e), { parse_mode: 'Markdown' });
+      await upsertUserEmail(fromId, e);
+      await sendMessage(chatId, MSG_EMAIL_OK(e), { parse_mode: 'Markdown' });
 
-  const hasPurchase = await hasApprovedPurchase(e);
-  if (hasPurchase) {
-    await setPremium(fromId, true);
-    await sendMessage(chatId, '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!');
-  } else {
-    await sendMessage(chatId, MSG_EMAIL_NOT_FOUND);
-  }
+      const hasPurchase = await hasApprovedPurchase(e);
+      if (hasPurchase) {
+        await setPremium(fromId, true);
+        await sendMessage(
+          chatId,
+          '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!'
+        );
+      } else {
+        await sendMessage(chatId, MSG_EMAIL_NOT_FOUND);
+      }
+      responded = true;
+      return res.status(200).json({ ok: true });
+    }
 
-  return res.status(200).json({ ok: true });
-}
-
-// /premium (admin)
+    // /premium (admin)
     if (isAdmin && text.startsWith('/premium')) {
       const [, cmd, idRaw] = text.split(' ');
       const targetId = idRaw ? idRaw.trim() : fromId;
@@ -201,13 +214,14 @@ if (text.startsWith('/email')) {
           parse_mode: 'Markdown'
         });
       }
+      responded = true;
       return res.status(200).json({ ok: true });
     }
 
     // Fluxo padrão
     const user = await getOrCreateUser(fromId);
 
-    // Se a usuária enviar um e-mail, tentamos ativar
+    // Se a usuária enviar um e-mail no texto, tentamos ativar
     if (looksLikeEmail(text)) {
       const email = text.toLowerCase();
       await sendMessage(chatId, MSG_EMAIL_SAVED(email));
@@ -216,10 +230,14 @@ if (text.startsWith('/email')) {
       const ok = await hasApprovedPurchase(email);
       if (ok) {
         await setPremium(fromId, true);
-        await sendMessage(chatId, '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!');
+        await sendMessage(
+          chatId,
+          '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!'
+        );
       } else {
         await sendMessage(chatId, MSG_EMAIL_NOT_FOUND);
       }
+      responded = true;
       return res.status(200).json({ ok: true });
     }
 
@@ -232,6 +250,7 @@ if (text.startsWith('/email')) {
         }
       });
       await sendMessage(chatId, MSG_ASK_EMAIL);
+      responded = true;
       return res.status(200).json({ ok: true });
     }
 
@@ -241,20 +260,28 @@ if (text.startsWith('/email')) {
         chatId,
         '📝 Inviami un *messaggio di testo* o un *messaggio vocale* chiaro (max 2 minuti).'
       );
+      responded = true;
       return res.status(200).json({ ok: true });
     }
 
     // Resposta da IA
     const reply = await openAIReply(text || 'Guidami.');
     await sendMessage(chatId, reply);
+    responded = true;
 
-    // Contabiliza grátis
-    if (!user.is_premium) await incrementFreeUsed(fromId);
+    // Contabiliza grátis (sem derrubar a conversa se falhar)
+    try {
+      if (!user.is_premium) await incrementFreeUsed(fromId);
+    } catch (err) {
+      console.error('increment_free_used failed:', err);
+    }
 
     return res.status(200).json({ ok: true });
   } catch (e) {
     console.error(e);
-    await sendMessage(chatId, MSG_ERROR);
+    if (!responded) {
+      await sendMessage(chatId, MSG_ERROR);
+    }
     return res.status(200).json({ ok: true });
   }
 };
