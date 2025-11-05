@@ -54,7 +54,23 @@ function looksLikeEmail(s) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
-async function openAIReply(prompt) {
+// ===== TOM DE HADASSA — EMPÁTICO, ESPIRITUAL E DIRETO =====
+async function openAIReply(prompt, userName = '') {
+  const nameLine = userName ? `La donna che ti scrive si chiama ${userName}.` : '';
+  const stylePrompt = `
+Sei *Hadassa*, la Guida dell’Amore™ — una guida spirituale e mentora delle donne.
+Parla con calore, profondità e autorità dolce.
+Tono: empatico, profetico e reale.
+Scrivi come se conoscessi l’anima di chi ti parla, ma con chiarezza psicologica e saggezza spirituale.
+Non usare mai frasi come "cara anima", "amica mia" o simili.
+Chiama la donna per nome una sola volta all’inizio, in modo naturale e affettuoso.
+Usa frasi brevi e immagini simboliche (luce, cielo, respiro, ferita, libertà).
+Alterna dolcezza e verità, come una guida che consola e risveglia.
+
+${nameLine}
+Messaggio ricevuto: ${prompt}
+`;
+
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -64,14 +80,7 @@ async function openAIReply(prompt) {
     body: JSON.stringify({
       model: 'gpt-4o-mini',
       temperature: 0.5,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Sei una guida amorosa spirituale (Guida dell’Amore). Rispondi con calore, chiarezza e fermezza.'
-        },
-        { role: 'user', content: prompt }
-      ]
+      messages: [{ role: 'system', content: stylePrompt }]
     })
   });
   const j = await r.json();
@@ -86,14 +95,17 @@ async function getTelegramFileUrl(fileId) {
   return `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${j.result.file_path}`;
 }
 
-// OpenAI Whisper: transcrever áudio (voz Telegram)
-async function transcribeFromUrl(fileUrl) {
+// ===== ALTERAÇÃO #1: Transcrever áudio forçando ITALIANO e sem mostrar por padrão =====
+async function transcribeFromUrl(fileUrl, language = 'it') {
   const audioResp = await fetch(fileUrl);
   const audioBuf = await audioResp.arrayBuffer();
 
   const fd = new FormData();
   fd.append('model', 'whisper-1');
   fd.append('file', new Blob([audioBuf]), 'voice.ogg');
+  // força a transcrição em italiano
+  fd.append('language', language);
+  // (opcional) garantir que não traduza: fd.append('translate', 'false');
 
   const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
@@ -147,8 +159,12 @@ export default async (req, res) => {
       }
       const fileId = (msg.voice?.file_id || msg.audio?.file_id);
       const url = await getTelegramFileUrl(fileId);
-      text = await transcribeFromUrl(url);
-      await sendMessage(chatId, `🗣️ *Trascrizione:* _${text}_`, { disable_web_page_preview: true });
+
+      // ===== ALTERAÇÃO #2: usar 'it' e não exibir transcrição por padrão =====
+      text = await transcribeFromUrl(url, 'it');
+      if (process.env.SHOW_TRANSCRIPT === '1') {
+        await sendMessage(chatId, `🗣️ *Trascrizione:* _${text}_`, { disable_web_page_preview: true });
+      }
       // (sem marcar responded aqui; ainda vamos mandar a resposta principal)
     }
 
@@ -264,8 +280,9 @@ export default async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    // Resposta da IA
-    const reply = await openAIReply(text || 'Guidami.');
+    // Resposta da IA — com o nome da usuária
+    const userName = msg.from?.first_name || '';
+    const reply = await openAIReply(text || 'Guidami.', userName);
     await sendMessage(chatId, reply);
     responded = true;
 
