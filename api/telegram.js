@@ -68,7 +68,7 @@ OBIETTIVO
 - Evita ripetizioni, termini tecnici inutili e frasi generiche.
 
 REGOLE DI STILE (psico-spirituale, didattico ed empatico)
-- Inizia chiamando l’utente per nome (se fornito).
+- Inizia chiamando l’utente per nome in modo naturale (usa il nome fornito sopra se presente).
 - Tono empatico e compassionevole, autorevolezza gentile (verità + direzione + speranza).
 - Spiega su tre livelli quando utile: psicologico (dopamina/ossitocina/attaccamento),
   mentale (schemi, “codice interiore”), spirituale (legami d’anima, preghiera).
@@ -83,20 +83,31 @@ ${nameLine}
 Messaggio ricevuto: ${prompt}
 `;
 
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      temperature: 0.5,
-      messages: [{ role: 'system', content: stylePrompt }]
-    })
-  });
-  const j = await r.json();
-  return j?.choices?.[0]?.message?.content?.trim() || '💗';
+  console.log('[DBG][openAIReply] calling OpenAI chat.completions...');
+  try {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0.5,
+        messages: [{ role: 'system', content: stylePrompt }]
+      })
+    });
+    const j = await r.json();
+    console.log('[DBG][openAIReply] OpenAI response status:', r.status);
+    if (r.status >= 400) {
+      console.error('[DBG][openAIReply] OpenAI error payload:', j);
+    }
+    const out = j?.choices?.[0]?.message?.content?.trim() || '💗';
+    return out;
+  } catch (err) {
+    console.error('[DBG][openAIReply] OpenAI call failed:', err);
+    throw err;
+  }
 }
 
 // Telegram: obter URL do arquivo
@@ -107,30 +118,33 @@ async function getTelegramFileUrl(fileId) {
   return `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${j.result.file_path}`;
 }
 
-// ===== Transcrever áudio em ITALIANO (estável) =====
+// ===== Transcrever áudio em ITALIANO e não mostrar por padrão =====
 async function transcribeFromUrl(fileUrl, language = 'it') {
+  console.log('[DBG][transcribe] fetching audio from Telegram fileUrl:', fileUrl);
   const audioResp = await fetch(fileUrl);
   const audioBuf = await audioResp.arrayBuffer();
 
   const fd = new FormData();
   fd.append('model', 'whisper-1');
-  fd.append('file', new Blob([audioBuf], { type: 'audio/ogg' }), 'voice.ogg');
+  fd.append('file', new Blob([audioBuf]), 'voice.ogg');
   fd.append('language', language);
+  fd.append('translate', 'false');
 
+  console.log('[DBG][transcribe] calling OpenAI whisper...');
   const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: fd
   });
-
-  if (!r.ok) {
-    const txt = await r.text();
-    throw new Error(`whisper_failed: ${r.status} ${txt}`);
-  }
-
   const j = await r.json();
-  if (!j.text) throw new Error('no transcript');
-  return j.text.trim();
+  console.log('[DBG][transcribe] whisper status:', r.status, 'payload keys:', Object.keys(j || {}));
+  if (!j.text) {
+    console.error('[DBG][transcribe] no transcript text. full payload:', j);
+    throw new Error('no transcript');
+  }
+  const txt = j.text.trim();
+  console.log('[DBG][transcribe] got transcript (first 100 chars):', txt.slice(0, 100));
+  return txt;
 }
 
 // ===== Helpers de FAQ Preço/Pagamento =====
@@ -168,14 +182,20 @@ export default async (req, res) => {
   if (req.method !== 'POST') return res.status(405).end();
 
   const update = req.body;
+  console.log('[DBG][update] raw update:', JSON.stringify(update));
+
   const msg = update?.message;
-  if (!msg) return res.status(200).json({ ok: true });
+  if (!msg) {
+    console.log('[DBG][update] no message field, finishing.');
+    return res.status(200).json({ ok: true });
+  }
 
   const chatId = msg.chat.id;
   const fromId = String(msg.from.id);
 
   // Entrada: texto ou áudio
   let text = (msg.text || '').trim();
+  console.log('[DBG][input] fromId:', fromId, 'hasText:', !!text, 'hasVoice:', !!msg.voice, 'hasAudio:', !!msg.audio);
 
   // Limite de voz (padrão 120s = 2 min)
   const VOICE_MAX_SECONDS = Number(process.env.VOICE_MAX_SECONDS || 120);
@@ -190,9 +210,11 @@ export default async (req, res) => {
     let durationSec = 0;
     if (msg.voice?.duration) durationSec = Number(msg.voice.duration);
     if (msg.audio?.duration) durationSec = Number(msg.audio.duration);
+    if (durationSec) console.log('[DBG][voice] durationSec:', durationSec);
 
     if (!text && (msg.voice || msg.audio)) {
       if (durationSec > VOICE_MAX_SECONDS) {
+        console.log('[DBG][voice] too long, sending limit message.');
         await sendMessage(
           chatId,
           `🎧 Il messaggio vocale è lungo *${Math.round(durationSec)}s*.\n` +
@@ -202,24 +224,16 @@ export default async (req, res) => {
         responded = true;
         return res.status(200).json({ ok: true });
       }
-
-      const fileId = (msg.voice?.file_id || msg.audio?.file_id);
-      const url = await getTelegramFileUrl(fileId);
-
-      // Transcrição com try/catch local (não derruba o fluxo)
       try {
+        const fileId = (msg.voice?.file_id || msg.audio?.file_id);
+        const url = await getTelegramFileUrl(fileId);
         text = await transcribeFromUrl(url, 'it');
         if (process.env.SHOW_TRANSCRIPT === '1') {
           await sendMessage(chatId, `🗣️ *Trascrizione:* _${text}_`, { disable_web_page_preview: true });
         }
       } catch (err) {
-        console.error('transcription failed:', err);
-        await sendMessage(
-          chatId,
-          `🗣️ Non sono riuscita a capire bene l’audio.\n` +
-          `Puoi *inviarmi di nuovo un vocale più breve* (max ${VOICE_MAX_SECONDS}s) ` +
-          `oppure *scrivere in testo* quello che vuoi dirmi? Ti rispondo subito. 🌹`
-        );
+        console.error('[DBG][voice] transcription failed:', err);
+        await sendMessage(chatId, '📝 Non sono riuscita a trascrivere il vocale. Puoi riprovare o scrivermi in testo?');
         responded = true;
         return res.status(200).json({ ok: true });
       }
@@ -227,6 +241,7 @@ export default async (req, res) => {
 
     // /start
     if (text === '/start') {
+      console.log('[DBG][/start] sending welcome photo...');
       await sendPhoto(chatId, WELCOME_IMAGE_URL, MSG_START, {
         reply_markup: {
           inline_keyboard: [[{ text: '💖 Attiva il Premium (–57%)', url: HOTMART_URL }]]
@@ -239,6 +254,7 @@ export default async (req, res) => {
     // /status
     if (text.startsWith('/status')) {
       const user = await getOrCreateUser(fromId);
+      console.log('[DBG][/status] user:', { fromId, free_used: user.free_used, is_premium: user.is_premium, LIMIT_FREE });
       await sendMessage(chatId, MSG_STATUS(user.free_used, user.is_premium));
       responded = true;
       return res.status(200).json({ ok: true });
@@ -247,6 +263,7 @@ export default async (req, res) => {
     // /email
     if (text.startsWith('/email')) {
       const e = text.replace('/email', '').trim();
+      console.log('[DBG][/email] received:', e);
       const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
       if (!e || !ok) {
         await sendMessage(chatId, MSG_EMAIL_BAD);
@@ -256,6 +273,7 @@ export default async (req, res) => {
       await upsertUserEmail(fromId, e);
       await sendMessage(chatId, MSG_EMAIL_OK(e));
       const hasPurchase = await hasApprovedPurchase(e);
+      console.log('[DBG][/email] hasApprovedPurchase:', hasPurchase);
       if (hasPurchase) {
         await setPremium(fromId, true);
         await sendMessage(chatId, '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!');
@@ -270,6 +288,7 @@ export default async (req, res) => {
     if (isAdmin && text.startsWith('/premium')) {
       const [, cmd, idRaw] = text.split(' ');
       const targetId = idRaw ? idRaw.trim() : fromId;
+      console.log('[DBG][/premium] cmd:', cmd, 'targetId:', targetId);
       if (cmd === 'on') {
         await setPremium(targetId, true);
         await sendMessage(chatId, MSG_PREMIUM_ON(targetId));
@@ -285,9 +304,12 @@ export default async (req, res) => {
 
     // ===== FAQ — ativo para TODAS, mas conta limite só se NÃO-PREMIUM =====
     const user = await getOrCreateUser(fromId);
+    console.log('[DBG][user] loaded:', { fromId, free_used: user.free_used, is_premium: user.is_premium, LIMIT_FREE });
+
     if (text) {
       const t = text.toLowerCase();
       if (isPricingQuestion(t)) {
+        console.log('[DBG][FAQ] pricing question matched.');
         await sendMessage(chatId, faqPricingMessage(), {
           disable_web_page_preview: true,
           reply_markup: {
@@ -295,12 +317,14 @@ export default async (req, res) => {
           }
         });
         if (!user.is_premium) {
-          try { await incrementFreeUsed(fromId); } catch (err) { console.error(err); }
+          try { await incrementFreeUsed(fromId); console.log('[DBG][FAQ] increment free_used (pricing) OK'); }
+          catch (err) { console.error('[DBG][FAQ] increment free_used (pricing) ERR:', err); }
         }
         responded = true;
         return res.status(200).json({ ok: true });
       }
       if (isPaymentQuestion(t)) {
+        console.log('[DBG][FAQ] payment question matched.');
         await sendMessage(chatId, faqPaymentMessage(), {
           disable_web_page_preview: true,
           reply_markup: {
@@ -308,7 +332,8 @@ export default async (req, res) => {
           }
         });
         if (!user.is_premium) {
-          try { await incrementFreeUsed(fromId); } catch (err) { console.error(err); }
+          try { await incrementFreeUsed(fromId); console.log('[DBG][FAQ] increment free_used (payment) OK'); }
+          catch (err) { console.error('[DBG][FAQ] increment free_used (payment) ERR:', err); }
         }
         responded = true;
         return res.status(200).json({ ok: true });
@@ -318,9 +343,11 @@ export default async (req, res) => {
     // E-mail no texto
     if (looksLikeEmail(text)) {
       const email = text.toLowerCase();
+      console.log('[DBG][email-inline] detected:', email);
       await sendMessage(chatId, MSG_EMAIL_SAVED(email));
       await upsertUserEmail(fromId, email);
       const ok = await hasApprovedPurchase(email);
+      console.log('[DBG][email-inline] hasApprovedPurchase:', ok);
       if (ok) {
         await setPremium(fromId, true);
         await sendMessage(chatId, '✨ *Premium attivato automaticamente.* Benvenuta nel cerchio interno!');
@@ -333,6 +360,7 @@ export default async (req, res) => {
 
     // Limite grátis
     if (!user.is_premium && user.free_used >= LIMIT_FREE) {
+      console.log('[DBG][limit] reached. free_used:', user.free_used, 'LIMIT_FREE:', LIMIT_FREE);
       await sendPhoto(chatId, UPSELL_IMAGE_URL, MSG_UPSELL, {
         reply_markup: { inline_keyboard: [[{ text: '💖 Attiva il Premium (–57%)', url: HOTMART_URL }]] }
       });
@@ -343,6 +371,7 @@ export default async (req, res) => {
 
     // Mensagem vazia
     if (!text) {
+      console.log('[DBG][empty] no text after all, instructing user.');
       await sendMessage(chatId, '📝 Inviami un *messaggio di testo* o un *messaggio vocale* chiaro (max 2 minuti).');
       responded = true;
       return res.status(200).json({ ok: true });
@@ -350,17 +379,34 @@ export default async (req, res) => {
 
     // Resposta IA
     const userName = msg.from?.first_name || '';
-    const reply = await openAIReply(text || 'Guidami.', userName);
+    console.log('[DBG][AI] calling openAIReply...');
+    let reply;
+    try {
+      reply = await openAIReply(text || 'Guidami.', userName);
+    } catch (err) {
+      console.error('[DBG][AI] openAIReply failed:', err);
+      await sendMessage(chatId, MSG_ERROR);
+      responded = true;
+      return res.status(200).json({ ok: true });
+    }
     await sendMessage(chatId, reply);
     responded = true;
+    console.log('[DBG][AI] reply sent.');
 
     try {
-      if (!user.is_premium) await incrementFreeUsed(fromId);
-    } catch (err) { console.error(err); }
+      if (!user.is_premium) {
+        await incrementFreeUsed(fromId);
+        console.log('[DBG][counter] increment free_used OK for', fromId);
+      } else {
+        console.log('[DBG][counter] premium user, not incrementing.');
+      }
+    } catch (err) {
+      console.error('[DBG][counter] increment free_used ERR:', err);
+    }
 
     return res.status(200).json({ ok: true });
   } catch (e) {
-    console.error(e);
+    console.error('[DBG][handler] caught error:', e);
     if (!responded) await sendMessage(chatId, MSG_ERROR);
     return res.status(200).json({ ok: true });
   }
